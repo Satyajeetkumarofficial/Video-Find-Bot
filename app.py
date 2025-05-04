@@ -1,88 +1,117 @@
 import os
-from flask import Flask
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
-)
-import requests
 import asyncio
+import requests
+from flask import Flask
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+)
 
-# Config from environment
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
-PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
-DEFAULT_RESULT_COUNT = int(os.getenv("DEFAULT_RESULT_COUNT", 10))
+# Env variables
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 
-# Flask for Koyeb health check
-flask_app = Flask(__name__)
+app = Flask(__name__)
 
-@flask_app.route('/')
-def home():
-    return 'Telegram Bot is running!'
+# /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("नमस्ते! वीडियो खोजने के लिए /video <शब्द> लिखें।")
 
-# Bot Handlers
-async def start(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("आप क्या वीडियो सर्च करना चाहते हैं? हिंदी या English में बताएं!")
+# /video command
+async def video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text("कृपया एक खोज शब्द दें, जैसे: /video dance")
+        return
 
-async def help_command(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("बस कोई भी शब्द भेजिए, मैं आपको Pixabay और Pexels से वीडियो दूंगा!")
+    # Ask for quality
+    keyboard = [
+        [InlineKeyboardButton("SD", callback_data=f"q_sd|{query}"),
+         InlineKeyboardButton("HD", callback_data=f"q_hd|{query}"),
+         InlineKeyboardButton("Full HD", callback_data=f"q_fullhd|{query}")]
+    ]
+    await update.message.reply_text("कृपया क्वालिटी चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_message(update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
-    await update.message.reply_text("आपको कितने वीडियो चाहिए? (उदाहरण: 10, 20, 50)")
+# Quality choice handler
+async def quality_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query_data = update.callback_query.data
+    await update.callback_query.answer()
 
-    # Wait for next message (quality or count), skipping that for simplicity
-    count = DEFAULT_RESULT_COUNT
+    quality, search_query = query_data.replace("q_", "").split("|")
 
-    pixabay = fetch_pixabay_videos(query, count)
-    pexels = fetch_pexels_videos(query, count)
+    # Fetch videos
+    videos = fetch_pixabay_videos(search_query, quality) + fetch_pexels_videos(search_query, quality)
+    if not videos:
+        await update.callback_query.edit_message_text("कोई वीडियो नहीं मिला। कृपया दूसरा शब्द आजमाएं।")
+        return
 
-    for item in pixabay + pexels:
-        await update.message.reply_video(video=item['video'], caption=item['title'], thumbnail=item['thumbnail'])
+    for video in videos[:20]:
+        await update.callback_query.message.reply_video(video["url"], thumbnail_url=video["thumb"])
 
-def fetch_pixabay_videos(query, count):
-    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={query}&per_page={count}"
-    res = requests.get(url).json()
+    await update.callback_query.edit_message_text(f"{len(videos[:20])} वीडियो भेजे गए!")
+
+# Fetch from Pixabay
+def fetch_pixabay_videos(query, quality):
+    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={query}&per_page=20"
+    res = requests.get(url)
     results = []
-    for hit in res.get("hits", []):
-        video_url = hit['videos']['medium']['url']
-        results.append({
-            "title": hit.get("tags", "Pixabay Video"),
-            "video": video_url,
-            "thumbnail": hit.get("picture_id") and f"https://i.vimeocdn.com/video/{hit['picture_id']}_295x166.jpg"
-        })
+
+    if res.status_code == 200:
+        for hit in res.json().get("hits", []):
+            videos = hit["videos"]
+            if quality == "sd":
+                video_url = videos["small"]["url"]
+            elif quality == "hd":
+                video_url = videos["medium"]["url"]
+            else:
+                video_url = videos["large"]["url"]
+            results.append({"url": video_url, "thumb": hit["picture_id"]})
     return results
 
-def fetch_pexels_videos(query, count):
+# Fetch from Pexels
+def fetch_pexels_videos(query, quality):
     headers = {"Authorization": PEXELS_API_KEY}
-    url = f"https://api.pexels.com/videos/search?query={query}&per_page={count}"
-    res = requests.get(url, headers=headers).json()
+    url = f"https://api.pexels.com/videos/search?query={query}&per_page=20"
+    res = requests.get(url, headers=headers)
     results = []
-    for video in res.get("videos", []):
-        video_url = video['video_files'][0]['link']
-        thumbnail = video['image']
-        results.append({
-            "title": video.get("url", "Pexels Video"),
-            "video": video_url,
-            "thumbnail": thumbnail
-        })
+
+    if res.status_code == 200:
+        for video in res.json().get("videos", []):
+            files = video["video_files"]
+            file = sorted(files, key=lambda x: x["height"])  # sort by height
+
+            if quality == "sd":
+                selected = file[0]
+            elif quality == "hd":
+                selected = next((f for f in file if f["quality"] == "hd"), file[-1])
+            else:
+                selected = file[-1]
+
+            results.append({"url": selected["link"], "thumb": video["image"]})
     return results
 
-# Main Telegram bot logic
-async def telegram_main():
+# Health route
+@app.route("/", methods=["GET", "HEAD"])
+def index():
+    return "Bot is running", 200
+
+# Run bot
+async def run_bot():
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CommandHandler("video", video))
+    application.add_handler(CallbackQueryHandler(quality_choice))
 
+    print("Telegram bot started...")
     await application.run_polling()
 
-# Launch both Flask and Telegram
+# Run everything
 if __name__ == "__main__":
-    # Start Telegram Bot in asyncio
     loop = asyncio.get_event_loop()
-    loop.create_task(telegram_main())
-
-    # Start Flask for Koyeb
-    flask_app.run(host="0.0.0.0", port=8080)
+    loop.create_task(run_bot())
+    app.run(host="0.0.0.0", port=8080)
