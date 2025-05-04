@@ -102,7 +102,6 @@ def webhook():
 
 
 # Set webhook when app starts
-@app.before_first_request
 def init_bot():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
