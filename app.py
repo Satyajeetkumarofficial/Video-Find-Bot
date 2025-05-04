@@ -1,113 +1,74 @@
-import os
-import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import requests
 from config import TELEGRAM_TOKEN, PIXABAY_API_KEY, PEXELS_API_KEY, DEFAULT_RESULT_COUNT
-from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    CallbackQueryHandler,
-    ContextTypes,
-)
 
-TOKEN = os.environ["TELEGRAM_TOKEN"]
-PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
-PEXELS_KEY = os.environ["PEXELS_API_KEY"]
-WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+# --- Pixabay Fetch ---
+def fetch_pixabay_videos(query):
+    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={query}&per_page={DEFAULT_RESULT_COUNT}"
+    response = requests.get(url)
+    data = response.json()
+    return data.get("hits", [])
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- Pexels Fetch ---
+def fetch_pexels_videos(query):
+    headers = {"Authorization": PEXELS_API_KEY}
+    url = f"https://api.pexels.com/videos/search?query={query}&per_page={DEFAULT_RESULT_COUNT}"
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    return data.get("videos", [])
 
-# Flask App
-app = Flask(__name__)
-
-# Bot app init
-application = Application.builder().token(TOKEN).build()
-
-
-# Start command
+# --- Start Command ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send me a keyword in English or Hindi to get videos.")
+
+# --- Video Search Handler ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text
     keyboard = [
         [
-            InlineKeyboardButton("High", callback_data="high"),
-            InlineKeyboardButton("Medium", callback_data="medium"),
-            InlineKeyboardButton("Low", callback_data="low"),
+            InlineKeyboardButton("Low", callback_data=f"{query}|low"),
+            InlineKeyboardButton("Medium", callback_data=f"{query}|medium"),
+            InlineKeyboardButton("High", callback_data=f"{query}|high"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Aapko kis quality mein media chahiye?", reply_markup=reply_markup)
+    await update.message.reply_text("Choose video quality:", reply_markup=reply_markup)
 
+# --- Quality Button Handler ---
+async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query_data = update.callback_query.data
+    await update.callback_query.answer()
+    query, quality = query_data.split("|")
+    await update.callback_query.message.reply_text(f"Searching for '{query}' videos in {quality} quality...")
 
-# Quality selector
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["quality"] = query.data
-    await query.edit_message_text(text=f"Quality select ki gayi: {query.data}\nAb aap search term bhejein.")
+    pixabay_videos = fetch_pixabay_videos(query)
+    pexels_videos = fetch_pexels_videos(query)
 
+    total_sent = 0
+    for video in pixabay_videos:
+        url = video['videos'][quality]['url']
+        thumb = video['picture_id']
+        await update.callback_query.message.reply_video(video=url)
+        total_sent += 1
+        if total_sent >= 10:
+            break
 
-# Search handler
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
-    quality = context.user_data.get("quality", "medium")
-    await update.message.reply_text(f"'{query}' ke liye media dhunda ja raha hai...")
+    for video in pexels_videos:
+        video_files = video['video_files']
+        chosen_file = next((f for f in video_files if quality in f['quality']), None)
+        if chosen_file:
+            await update.callback_query.message.reply_video(video=chosen_file['link'])
+            total_sent += 1
+        if total_sent >= 20:
+            break
 
-    results = get_pixabay(query, quality) + get_pexels(query, quality)
-    results = results[:50]
-
-    if not results:
-        await update.message.reply_text("Kuch nahi mila.")
-        return
-
-    for video in results:
-        try:
-            await update.message.reply_video(video=video['video_url'], caption=video['thumbnail_url'])
-        except Exception as e:
-            logger.warning(f"Video send failed: {e}")
-
-
-# Pixabay - Videos Fetch
-def get_pixabay(query, quality):
-    q_map = {"high": "largeImageURL", "medium": "webformatURL", "low": "previewURL"}
-    url = f"https://pixabay.com/api/videos/?key={PIXABAY_KEY}&q={requests.utils.quote(query)}&video_type=movie&per_page=25"
-    res = requests.get(url).json()
-    return [{
-        'video_url': video['videos']['large']['url'],
-        'thumbnail_url': video['videos']['preview']['url']
-    } for video in res.get("hits", [])]
-
-
-# Pexels - Videos Fetch
-def get_pexels(query, quality):
-    s_map = {"high": "original", "medium": "medium", "low": "small"}
-    url = f"https://api.pexels.com/videos/search?query={requests.utils.quote(query)}&per_page=25"
-    headers = {"Authorization": PEXELS_KEY}
-    res = requests.get(url, headers=headers).json()
-    return [{
-        'video_url': video['video_files'][0]['link'],
-        'thumbnail_url': video['video_files'][0]['thumbnail']
-    } for video in res.get("videos", [])]
-
-
-# Telegram webhook endpoint
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok"
-
-
-# Set webhook when app starts
-def init_bot():
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
-    application.bot.set_webhook(WEBHOOK_URL)
-
-
+# --- Main ---
 if __name__ == "__main__":
-    app.run(port=8080)
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(quality_selected))
+
+    app.run_polling()
