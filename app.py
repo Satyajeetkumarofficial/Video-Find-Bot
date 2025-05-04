@@ -3,6 +3,8 @@ import asyncio
 import requests
 from flask import Flask
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
