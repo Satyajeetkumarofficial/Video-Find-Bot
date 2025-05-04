@@ -13,9 +13,9 @@ from telegram.ext import (
 )
 
 # Env variables
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
+TELEGRAM_TOKEN = os.environ.get("7978759722:AAGXr2jJgZbW4NefFaFHnSGwLEKP8Cjizl4")
+PIXABAY_API_KEY = os.environ.get("50085343-078251d5a9190de8a512b45e4")
+PEXELS_API_KEY = os.environ.get("IKaFkLUIDIe0OP45i8FucqLyRHQxiEDgQ5kTEazihdh695zcpVB7k434")
 
 app = Flask(__name__)
 
